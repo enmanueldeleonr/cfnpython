@@ -14,13 +14,13 @@
 First you need to deploy the CFN
 
 ```bash
-aws cloudformation deploy --template-file dataprocessproject.yaml --stack-name data-proccesing --region us-east-1 --capabilities CAPABILITY_NAMED_IAM
+aws cloudformation deploy --template-file dataprocessproject.yaml --stack-name data-proccesing --region {Region} --capabilities CAPABILITY_NAMED_IAM
 ```
 
-In order to run the cralwer that will create the table to be query with Athena you need to run
+Use this command to execute the first Lambda that will download and extract file, this will trigger process
 
 ```bash
-aws glue start-crawler --name sales-crawler --region us-east-1
+aws lambda invoke --function-name 'dataprocessproject-LambdaRawData' --region {Region} response.json
 ```
 
 When you enter the Athena Service, you need to pick up sales-workgroup, this workgroup is setup with the CFN Templates.
@@ -32,7 +32,7 @@ Then you just need to select:
 - Table : salessales
 
 
-## How would I do it
+## How would I have done it
 
 ![alt Proposal Diagram](images/cfn_proposal.jpg)
 

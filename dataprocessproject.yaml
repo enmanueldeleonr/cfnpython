@@ -12,14 +12,7 @@ Parameters:
     Default: dataprocessproject
 
 Resources:
-  RAWS3Bucket:
-    Type: 'AWS::S3::Bucket'
-    Properties:
-      BucketName: !Sub '${Prefix}-raw-data-entry-123456789'
-      BucketEncryption: 
-          ServerSideEncryptionConfiguration: 
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+  
 
   ANAS3Bucket:
     Type: 'AWS::S3::Bucket'
@@ -58,6 +51,7 @@ Resources:
           - Effect: Allow
             Action: 
               - 's3:*Object'
+              - 's3:Get*'
             Resource: "*"
           - Effect: Allow
             Action:
@@ -68,6 +62,11 @@ Resources:
             Action:
               - 'logs:CreateLogGroup'
             Resource: "*"
+          - Effect: Allow
+            Action:
+              - 'glue:*'
+            Resource: "*"
+            
       Roles:
         - !Ref LambdaRole
 
@@ -86,7 +85,7 @@ Resources:
       Environment:
         Variables:
           extURL: 'http://eforexcel.com/wp/wp-content/uploads/2020/09/2m-Sales-Records.zip'
-          destination: !Ref RAWS3Bucket
+          destination: !Sub '${Prefix}-raw-data-entry-123456789'
       Code:
         ZipFile: |
             #Using enviroment variable extURL to bring the URL of the files.
@@ -132,7 +131,7 @@ Resources:
       Description: Partitions by Country and Store as Parquet
       FunctionName: !Sub '${Prefix}-LambdaDataPartition'
       Handler: index.lambda_handler
-      MemorySize: 1024
+      MemorySize: 2048
       Runtime: python3.8
       Role: !GetAtt 'LambdaRole.Arn'
       Timeout: 240
@@ -140,25 +139,68 @@ Resources:
         - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python38:1
       Environment:
         Variables:
-          source: !Ref RAWS3Bucket
-          destination: !Ref ANAS3Bucket
+          source: !Sub '${Prefix}-raw-data-entry-123456789'
+          destination: !Sub '${Prefix}-analytics-data-123456789'
       Code:
         ZipFile: |
-            #Picking CSV file to transform to Parquet and Stored Partition by Country
-            import pandas as pd
-            import awswrangler as wr
-            import os
-            import boto3
+          #Picking CSV file to transform to Parquet and Stored Partition by Country
+          import pandas as pd
+          import awswrangler as wr
+          import os
+          import boto3
+          import urllib.parse
 
-            source=os.environ.get('source')
-            destination=os.environ.get('destination')
-            df = wr.s3.read_csv('s3://' + source + '/raw/2m Sales Records.csv')
+          source=os.environ.get('source')
+          destination=os.environ.get('destination')
+          #df = wr.s3.read_csv('s3://' + source + '/raw/2m Sales Records.csv')
+          glue = boto3.client('glue')
+          s3 = boto3.client('s3')
 
-            def lambda_handler(event, context):
-              s3 = boto3.client('s3')
-              wr.s3.to_parquet(df=df, path='s3://' + destination + '/sales/', dataset=True, partition_cols=['Country'])
-              return('Done')
+          def lambda_handler(event, context):
+            s3 = boto3.client('s3')
+            source = event['Records'][0]['s3']['bucket']['name']
+            key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
+            df = wr.s3.read_csv('s3://' + source + key)
+            
+            wr.s3.to_parquet(df=df, path='s3://' + destination + '/sales/', dataset=True, partition_cols=['Country'])
+            try:
+              glue.start_crawler(Name='sales-crawler')
+            except Exception as e:
+              print(e)
+              print('Error starting crawler')
+              raise e
+              
+            return(f'The file: {key} was processes')
 
+
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunctionPartition
+      Principal: s3.amazonaws.com
+      SourceArn: !Join [ '', ['arn:aws:s3:::', !Sub '${Prefix}-raw-data-entry-123456789']] 
+  
+  RAWS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${Prefix}-raw-data-entry-123456789'
+      BucketEncryption: 
+          ServerSideEncryptionConfiguration: 
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: zipped/
+                  - Name: suffix
+                    Value: .zip
+            Function: !GetAtt LambdaFunctionPartition.Arn
+    
 
   GLUEROLE:
     Type: AWS::IAM::Role
@@ -184,6 +226,7 @@ Resources:
                 Effect: "Allow"
                 Action: "*"
                 Resource: "*"
+
  # Create a database to contain tables created by the crawler
   GLUEDATABASE:
     Type: AWS::Glue::Database
