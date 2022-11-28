@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Create Process for RAW Data and Analytics Data
+
+Parameters:
+  Prefix:
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_-]*'
+    Description: Prefix For All Services Created
+    Default: dataprocessproject
+
+Resources:
+  RAWS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${Prefix}-raw-data-entry-123456789'
+      BucketEncryption: 
+          ServerSideEncryptionConfiguration: 
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ANAS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${Prefix}-analytics-data-123456789'
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Prefix}-LambdaExecutionRole'
+      Description: An execution role for a Lambda function 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action:
+          - 'sts:AssumeRole'
+      
+  LambdaPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${Prefix}-LambdaPolicyName'
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:ListBucket'
+            Resource: "*"
+          - Effect: Allow
+            Action: 
+              - 's3:*Object'
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource:  "*"
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+            Resource: "*"
+      Roles:
+        - !Ref LambdaRole
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Description: Unzip and Moves files to RAWS3Bucket
+      FunctionName: !Sub '${Prefix}-LambdaRawData'
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Runtime: python3.9
+      Role: !GetAtt 'LambdaRole.Arn'
+      Timeout: 240
+      Layers:
+        - 'arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p39-requests:8'
+      Environment:
+        Variables:
+          extURL: 'http://eforexcel.com/wp/wp-content/uploads/2020/09/2m-Sales-Records.zip'
+          destination: !Ref RAWS3Bucket
+      Code:
+        ZipFile: |
+            #Using enviroment variable extURL to bring the URL of the files.
+            #Downloads the zipped file to a RAW s3 Bucket
+            import os
+            import boto3
+            import requests
+            import zipfile
+            from io import BytesIO
+
+            #Simulating Headers
+            headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0',
+            }
+
+
+            bucket=os.environ.get('destination')
+            url=os.environ.get('extURL')
+            zipfilename='2m-Sales-Records.zip'
+            def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              s3_resource = boto3.resource('s3')
+              zip_key= 'zipped/' + zipfilename
+              #Uploads Zipped file to S3
+              download=requests.get(url, stream=True, headers = headers)
+              s3.upload_fileobj(BytesIO(download.content), bucket, zip_key)
+              #Unzipping the File into data
+              zipped_obj = s3_resource.Object(bucket_name=bucket, key=zip_key)
+              buffer = BytesIO(zipped_obj.get()["Body"].read())
+              z = zipfile.ZipFile(buffer)
+              for filename in z.namelist():
+                file_info = z.getinfo(filename)
+                s3_resource.meta.client.upload_fileobj(
+                    z.open(filename),
+                    Bucket=bucket,
+                    Key=f'raw/{filename}'
+                )
+              return(zipfilename + ' Done')
+
+  LambdaFunctionPartition:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Description: Partitions by Country and Store as Parquet
+      FunctionName: !Sub '${Prefix}-LambdaDataPartition'
+      Handler: index.lambda_handler
+      MemorySize: 1024
+      Runtime: python3.8
+      Role: !GetAtt 'LambdaRole.Arn'
+      Timeout: 240
+      Layers:
+        - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python38:1
+      Environment:
+        Variables:
+          source: !Ref RAWS3Bucket
+          destination: !Ref ANAS3Bucket
+      Code:
+        ZipFile: |
+            #Picking CSV file to transform to Parquet and Stored Partition by Country
+            import pandas as pd
+            import awswrangler as wr
+            import os
+            import boto3
+
+            source=os.environ.get('source')
+            destination=os.environ.get('destination')
+            df = wr.s3.read_csv('s3://' + source + '/raw/2m Sales Records.csv')
+
+            def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              wr.s3.to_parquet(df=df, path='s3://' + destination + '/sales/', dataset=True, partition_cols=['Country'])
+              return('Done')
+
+
+  GLUEROLE:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+ # Create a database to contain tables created by the crawler
+  GLUEDATABASE:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: salesdatabase
+        Description: "AWS Glue database for sales data"
+
+  GLUECRAWLER:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: sales-crawler
+      Role: !GetAtt GLUEROLE.Arn
+      Description: Amazon Glue crawler sales data
+      DatabaseName: !Ref GLUEDATABASE
+      Targets:
+        S3Targets:
+          - Path: "s3://dataprocessproject-analytics-data-123456789/sales/"
+      TablePrefix: sales
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:  !Sub "${Prefix}-LambdaLogGroup"
+      RetentionInDays: 30
+
+  AthenaResults:
+    Type: "AWS::S3::Bucket"
+    Properties: 
+      BucketName: !Join [ '-', ['athena-results', Ref: 'AWS::AccountId']] 
+
+  WORKGROUPA:
+    Type: AWS::Athena::WorkGroup
+    Properties:       
+      Name: sales-workgroup
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Join [ '', ['s3://', Ref: AthenaResults, '/']]
