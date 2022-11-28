@@ -34,6 +34,8 @@ Then you just need to select:
 
 ## How would I do it
 
+![alt Proposal Diagram](images/cfn_proposal.jpg)
+
 ### IAC 
 
 I would rather used CDK with Python for more funcional CFN development
