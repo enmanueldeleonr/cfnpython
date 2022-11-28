@@ -1,5 +1,7 @@
 # Cloudformation Project to Read from HTTP and Store on S3
 
+![alt Solution Diagram](images/cfn.jpg)
+
 ## Before you start
 ### Prerequisites
 
@@ -28,3 +30,21 @@ Then you just need to select:
 - Data source : AwsDataCatalog
 - Database : salesdatabase
 - Table : salessales
+
+
+## How would I do it
+
+### IAC 
+
+I would rather used CDK with Python for more funcional CFN development
+
+### Data Papiline 
+
+Using AWS Step Functions to Trigger frist the Lambda to Extract the file into S3
+
+Then use AWS Glue (Spark) to read the CSV and then do the tranform into the Analytics Bucket
+
+### Development
+
+I would have use Glue Interactive Sessions Notebooks, to Develop the core transformation.
+
